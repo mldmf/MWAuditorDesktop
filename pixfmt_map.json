@@ -1,0 +1,19 @@
+{
+  "rgb_formats": [
+    "rgb24","bgr24","rgba","bgra","argb","abgr","pal8",
+    "gbrp","gbrap",
+    "gbrp10le","gbrp12le","gbrp14le","gbrp16le",
+    "gbrap10le","gbrap16le",
+    "rgb48le","rgb48be","rgba64le","rgba64be"
+  ],
+  "yuv_formats": [
+    "yuv420p","yuv422p","yuv444p","yuvj420p","yuvj422p","yuvj444p",
+    "yuv420p10le","yuv420p12le","yuv422p10le","yuv422p12le",
+    "yuv444p10le","yuv444p12le","yuv444p16le",
+    "nv12","nv21","p010le","p016le",
+    "yuyv422","uyvy422"
+  ],
+  "gray_formats": [
+    "gray","gray10le","gray12le","gray16le","ya8"
+  ]
+}
