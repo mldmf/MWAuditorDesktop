@@ -235,6 +235,7 @@ class ProfileEditor(QWidget):
         template = {
             "auflösung": {"x": {"min": 0, "max": 99999}, "y": {"min": 0, "max": 99999}},
             "bildrate_fps": {"min": 0, "max": 1000},
+            "videolänge_s": {"min": 0, "max": 100000},
             "frame_rate_mode": ["CFR", "VFR"],
             "farbraum": ["RGB", "YUV", "GRAY"],
             "bit_tiefe": {"min": 1, "max": 16},
@@ -289,7 +290,15 @@ class ProfileEditor(QWidget):
     def validate(self):
         try:
             data = json.loads(self.editor.toPlainText())
-            required = ["auflösung", "bildrate_fps", "frame_rate_mode", "farbraum", "bit_tiefe", "dateiformat"]
+            required = [
+                "auflösung",
+                "bildrate_fps",
+                "videolänge_s",
+                "frame_rate_mode",
+                "farbraum",
+                "bit_tiefe",
+                "dateiformat",
+            ]
             missing = [k for k in required if k not in data]
             if missing:
                 self.validate_label.setText(f"Fehlende Felder: {', '.join(missing)}")

@@ -112,18 +112,19 @@ def detect_frame_rate_mode(pts_sec: List[float], tol_rel: float = 0.005, min_rat
 
 # ---------- Dekodierung & Messung ----------
 
-def decode_video_info(path: str) -> Tuple[Optional[str], Optional[Tuple[int,int]], Optional[float], Optional[str]]:
+def decode_video_info(path: str) -> Tuple[Optional[str], Optional[Tuple[int,int]], Optional[float], Optional[str], Optional[float]]:
     try:
         container = av.open(path)
     except av.AVError:
-        return None, None, None, None
+        return None, None, None, None, None
     vstream = next((s for s in container.streams if s.type == "video"), None)
     if vstream is None:
-        return None, None, None, None
+        return None, None, None, None, None
 
     pts_sec: List[float] = []
     pix_fmt_name = None
     width = height = None
+    duration_sec: Optional[float] = None
 
     for frame in container.decode(vstream):
         if pix_fmt_name is None:
@@ -138,7 +139,22 @@ def decode_video_info(path: str) -> Tuple[Optional[str], Optional[Tuple[int,int]
         if span > 0:
             fps_measured = (len(pts_sec) - 1) / span
 
-    return pix_fmt_name, (width, height) if width and height else None, fps_measured, detect_frame_rate_mode(pts_sec)
+    if vstream.duration is not None and vstream.time_base is not None:
+        duration_sec = float(vstream.duration) * float(vstream.time_base)
+    elif container.duration is not None:
+        duration_sec = float(container.duration) * float(av.time_base)
+    elif pts_sec:
+        duration_sec = pts_sec[-1] - pts_sec[0]
+        if len(pts_sec) > 1 and fps_measured:
+            duration_sec += 1.0 / fps_measured
+
+    return (
+        pix_fmt_name,
+        (width, height) if width and height else None,
+        fps_measured,
+        detect_frame_rate_mode(pts_sec),
+        duration_sec,
+    )
 
 # ---------- Hashing ----------
 
@@ -183,14 +199,15 @@ def build_media_profile(input_path: str, hash_algo: str) -> Dict[str, Any]:
         "bildrate_fps": None,
         "frame_rate_mode": None,
         "farbraum": None,
-        "bit_tiefe": None
+        "bit_tiefe": None,
+        "videolänge_s": None,
     }
 
     if not exists or size == 0:
         return prof
 
     prof["dateiformat"] = sniff_container(p)
-    pix_fmt, res, fps, frm_mode = decode_video_info(str(p))
+    pix_fmt, res, fps, frm_mode, duration_sec = decode_video_info(str(p))
     if pix_fmt or res or fps:
         prof["lesbar"] = True
     if res:
@@ -202,6 +219,8 @@ def build_media_profile(input_path: str, hash_algo: str) -> Dict[str, Any]:
     if pix_fmt:
         prof["farbraum"] = classify_farbraum(pix_fmt)
         prof["bit_tiefe"] = bitdepth_from_pixfmt(pix_fmt)
+    if duration_sec is not None:
+        prof["videolänge_s"] = round(duration_sec, 6)
     return prof
 
 # ---------- Validation ----------
@@ -211,6 +230,7 @@ CRITERIA_ORDER = [
     "farbraum",
     "bit_tiefe",
     "bildrate_fps",
+    "videolänge_s",
     "frame_rate_mode",
     "auflösung.x",
     "auflösung.y",
@@ -254,6 +274,7 @@ def validate_full(media_profile: Dict[str, Any], profile_spec: Optional[Dict[str
     pf_farbraum   = _as_allowed_list(pf.get("farbraum"))
     pf_bit_tiefe  = pf.get("bit_tiefe") if isinstance(pf.get("bit_tiefe"), dict) else None
     pf_fps        = pf.get("bildrate_fps") if isinstance(pf.get("bildrate_fps"), dict) else None
+    pf_duration   = pf.get("videolänge_s") if isinstance(pf.get("videolänge_s"), dict) else None
     pf_frmode     = _as_allowed_list(pf.get("frame_rate_mode"))
     pf_ax         = pf.get("auflösung", {}).get("x") if isinstance(pf.get("auflösung"), dict) else None
     pf_ay         = pf.get("auflösung", {}).get("y") if isinstance(pf.get("auflösung"), dict) else None
@@ -272,6 +293,10 @@ def validate_full(media_profile: Dict[str, Any], profile_spec: Optional[Dict[str
 
     ok, info, counted = _in_range(media_profile.get("bildrate_fps"), pf_fps)
     details["bildrate_fps"] = {"ok": ok, "info": info}
+    overall_ok &= (ok if counted else True); counted_any |= counted
+
+    ok, info, counted = _in_range(media_profile.get("videolänge_s"), pf_duration)
+    details["videolänge_s"] = {"ok": ok, "info": info}
     overall_ok &= (ok if counted else True); counted_any |= counted
 
     ok, info, counted = _in_allowed(media_profile.get("frame_rate_mode"), pf_frmode)
