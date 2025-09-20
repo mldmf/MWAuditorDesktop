@@ -143,12 +143,10 @@ def decode_video_info(path: str) -> Tuple[Optional[str], Optional[Tuple[int,int]
 # ---------- Hashing ----------
 
 def compute_file_hash(path: Path, algo: str = "sha256", chunk_size: int = 1024 * 1024) -> Optional[str]:
-    """Berechnet den Hash streaming-basiert. Gibt hex-String zurück oder None bei Fehler."""
     algo = algo.lower()
     try:
         h = hashlib.new(algo)
     except ValueError:
-        # Fallback auf sha256, falls unbekanntes Verfahren
         h = hashlib.sha256()
         algo = "sha256"
     try:
@@ -175,16 +173,11 @@ def build_media_profile(input_path: str, hash_algo: str) -> Dict[str, Any]:
     }
 
     prof: Dict[str, Any] = {
-        # Header
         "filename": p.name,
         "file_id": file_id,
-
-        # Basis
         "quelle": str(p),
-        "lesbar": False,              # True, wenn dekodierbar
-        "non_zero_bytes": size > 0,   # True, wenn Datei NICHT leer
-
-        # Technische Werte
+        "lesbar": False,
+        "non_zero_bytes": size > 0,
         "dateiformat": None,
         "auflösung": {"x": None, "y": None},
         "bildrate_fps": None,
@@ -294,9 +287,7 @@ def validate_full(media_profile: Dict[str, Any], profile_spec: Optional[Dict[str
     overall_ok &= (ok if counted else True); counted_any |= counted
 
     status = "passend" if (overall_ok or not counted_any) else "failed"
-    return {"status": status, "details": {k: details[k] for k in [
-        "dateiformat","farbraum","bit_tiefe","bildrate_fps","frame_rate_mode","auflösung.x","auflösung.y"
-    ]}}
+    return {"status": status, "details": {k: details[k] for k in CRITERIA_ORDER}}
 
 # ---------- Main ----------
 
@@ -311,6 +302,8 @@ def main():
     ap.add_argument("--hash-algo", default="sha256",
                     choices=["md5","sha1","sha256","sha512"],
                     help="Hash-Verfahren für file_id (Default: sha256)")
+    ap.add_argument("--summary-only", action="store_true",
+                    help="Nur Validierungs-Zusammenfassung in der Konsole ausgeben")
     args = ap.parse_args()
 
     in_path = args.input
@@ -320,8 +313,9 @@ def main():
     media_out = Path(args.media_out) if args.media_out else default_out_dir / f"{base_name}.mediaprofile.json"
     report_out = Path(args.report_out) if args.report_out else default_out_dir / f"{base_name}.validationreport.json"
 
-    print(f"Schreibe Media-Profil nach: {media_out}")
-    print(f"Schreibe Validation-Report nach: {report_out}")
+    if not args.summary_only:
+        print(f"Schreibe Media-Profil nach: {media_out}")
+        print(f"Schreibe Validation-Report nach: {report_out}")
 
     # Media-Profil inkl. Hash erstellen
     media_profile = build_media_profile(in_path, args.hash_algo)
@@ -341,7 +335,6 @@ def main():
 
     validation = validate_full(media_profile, profile_spec)
 
-    # Report-Objekt: Header (filename + file_id) ebenfalls top-level ausgeben
     report_obj = {
         "filename": media_profile.get("filename"),
         "file_id": media_profile.get("file_id"),
@@ -354,8 +347,17 @@ def main():
     with open(report_out, "w", encoding="utf-8") as f:
         json.dump(report_obj, f, ensure_ascii=False, indent=2 if args.pretty else None)
 
-    # Konsole (farbig)
-    print(json.dumps(report_obj, ensure_ascii=False, indent=2 if args.pretty else None))
+    # Konsole
+    if not args.summary_only:
+        print(json.dumps(report_obj, ensure_ascii=False, indent=2 if args.pretty else None))
+
+    if args.summary_only:
+        print(f"Datei: {report_obj['filename']}")
+        file_id = report_obj.get("file_id", {})
+        algo = file_id.get("algorithm")
+        hsh = file_id.get("hash")
+        print(f"Hash ({algo}): {hsh}\n")
+
     status = report_obj["validation"]["status"]
     details = report_obj["validation"]["details"]
     print()
