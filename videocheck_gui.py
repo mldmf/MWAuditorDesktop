@@ -30,7 +30,7 @@ from typing import List, Tuple, Optional, Dict
 
 import av
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QRect
 from PySide6.QtGui import QAction, QIcon, QColor, QBrush, QFont, QPixmap, QImage
 from PySide6.QtWidgets import (
     QApplication,
@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QStyle,
     QSizePolicy,
+    QFileDialog,
 )
 
 APP_TITLE = "Matchwinners Auditor"
@@ -855,6 +856,18 @@ class VideoPreviewTab(QWidget):
         self.zoom_in_btn.clicked.connect(lambda: self.adjust_zoom(1.25))
         controls.addWidget(self.zoom_in_btn)
 
+        controls.addSpacing(20)
+
+        self.save_btn = QToolButton()
+        self.save_btn.setText("PNG sichern")
+        self.save_btn.clicked.connect(self.save_current_frame)
+        controls.addWidget(self.save_btn)
+
+        self.copy_btn = QToolButton()
+        self.copy_btn.setText("PNG kopieren")
+        self.copy_btn.clicked.connect(self.copy_current_frame)
+        controls.addWidget(self.copy_btn)
+
         controls.addStretch()
 
         right_layout.addLayout(controls)
@@ -1062,6 +1075,56 @@ class VideoPreviewTab(QWidget):
         if self.current_index >= len(self.frames):
             self.current_index = len(self.frames) - 1
             self._show_current_frame()
+
+    def _current_image(self) -> Optional[QImage]:
+        if not self.frames or self.current_index >= len(self.frames):
+            return None
+        return self.frames[self.current_index]
+
+    def _visible_image(self) -> Optional[QImage]:
+        image = self._current_image()
+        if image is None or self.pixmap_item is None:
+            return image
+        viewport_rect = self.view.viewport().rect()
+        if viewport_rect.isEmpty():
+            return image
+        scene_poly = self.view.mapToScene(viewport_rect)
+        scene_rect = scene_poly.boundingRect()
+        pix_rect = self.pixmap_item.sceneBoundingRect()
+        visible = scene_rect.intersected(pix_rect)
+        if visible.isEmpty():
+            return None
+        aligned = visible.toAlignedRect()
+        bounds = QRect(0, 0, image.width(), image.height())
+        cropped_rect = aligned.intersected(bounds)
+        if cropped_rect.isEmpty():
+            return None
+        return image.copy(cropped_rect)
+
+    def save_current_frame(self) -> None:
+        image = self._visible_image()
+        if image is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Screenshot speichern", str(Path.home() / "frame.png"), "PNG (*.png)")
+        if not path:
+            return
+        try:
+            image.save(path, "PNG")
+            main = self.window()
+            if isinstance(main, QMainWindow):
+                main.statusBar().showMessage(f"Screenshot gespeichert: {path}", 3000)
+        except Exception as exc:
+            QMessageBox.critical(self, "Fehler", f"Screenshot konnte nicht gespeichert werden:\n{exc}")
+
+    def copy_current_frame(self) -> None:
+        image = self._visible_image()
+        if image is None:
+            return
+        clipboard = QApplication.clipboard()
+        clipboard.setImage(image)
+        main = self.window()
+        if isinstance(main, QMainWindow):
+            main.statusBar().showMessage("Screenshot in Zwischenablage kopiert", 3000)
 
 class CheckTab(QWidget):
     def __init__(self, logo_path: Optional[str]):
