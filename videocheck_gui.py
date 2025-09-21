@@ -45,9 +45,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QTabWidget,
     QLineEdit,
-    QPlainTextEdit,
     QFormLayout,
     QGroupBox,
+    QSpinBox,
+    QDoubleSpinBox,
 )
 
 APP_TITLE = "VideoCheck"
@@ -198,15 +199,53 @@ class ProfileEditor(QWidget):
         top.addWidget(btn_save_as)
         root.addLayout(top)
 
-        # Editor
-        group = QGroupBox("Inhalt der Zielwerte (JSON)")
-        group_layout = QVBoxLayout(group)
-        self.editor = QPlainTextEdit()
-        self.editor.setPlaceholderText("{\n  \"zielwerte_beispiel\": true\n}")
-        self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.editor.setTabStopDistance(4 * self.editor.fontMetrics().horizontalAdvance(' '))
-        group_layout.addWidget(self.editor)
+        # Formularfelder
+        group = QGroupBox("Zielwerte")
+        group_layout = QFormLayout(group)
+
+        def make_spin(minimum: int, maximum: int) -> QSpinBox:
+            box = QSpinBox()
+            box.setRange(minimum, maximum)
+            box.setAlignment(Qt.AlignRight)
+            return box
+
+        def make_dspin(minimum: float, maximum: float, decimals: int = 3) -> QDoubleSpinBox:
+            box = QDoubleSpinBox()
+            box.setRange(minimum, maximum)
+            box.setDecimals(decimals)
+            box.setAlignment(Qt.AlignRight)
+            return box
+
+        self.res_x_min = make_spin(0, 100000)
+        self.res_x_max = make_spin(0, 100000)
+        self.res_y_min = make_spin(0, 100000)
+        self.res_y_max = make_spin(0, 100000)
+        self.fps_min = make_dspin(0.0, 1000.0, 3)
+        self.fps_max = make_dspin(0.0, 1000.0, 3)
+        self.duration_min = make_dspin(0.0, 100000.0, 3)
+        self.duration_max = make_dspin(0.0, 100000.0, 3)
+        self.bit_min = make_spin(1, 64)
+        self.bit_max = make_spin(1, 64)
+
+        self.frame_mode_edit = QLineEdit()
+        self.frame_mode_edit.setPlaceholderText("z.B. CFR, VFR")
+        self.color_space_edit = QLineEdit()
+        self.color_space_edit.setPlaceholderText("z.B. RGB, YUV")
+        self.format_edit = QLineEdit()
+        self.format_edit.setPlaceholderText("z.B. mp4/mov")
+
+        group_layout.addRow("Auflösung X (min/max)", self._make_min_max_row(self.res_x_min, self.res_x_max))
+        group_layout.addRow("Auflösung Y (min/max)", self._make_min_max_row(self.res_y_min, self.res_y_max))
+        group_layout.addRow("Bildrate FPS (min/max)", self._make_min_max_row(self.fps_min, self.fps_max))
+        group_layout.addRow("Videolänge in s (min/max)", self._make_min_max_row(self.duration_min, self.duration_max))
+        group_layout.addRow("Bittiefe (min/max)", self._make_min_max_row(self.bit_min, self.bit_max))
+        group_layout.addRow("Frame-Rate-Modus", self.frame_mode_edit)
+        group_layout.addRow("Farbraum", self.color_space_edit)
+        group_layout.addRow("Dateiformat", self.format_edit)
+
         root.addWidget(group)
+
+        self._set_defaults()
 
         # Validierung
         form = QFormLayout()
@@ -224,24 +263,149 @@ class ProfileEditor(QWidget):
 
         # initial laden
         if self.current_path:
-            try:
-                self.editor.setPlainText(Path(self.current_path).read_text(encoding="utf-8"))
-                self.profile_changed.emit(self.current_path)
-            except Exception:
-                pass
+            self._load_from_path(self.current_path, show_errors=False)
+
+    def _make_min_max_row(self, min_widget, max_widget) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(QLabel("min"))
+        layout.addWidget(min_widget)
+        layout.addWidget(QLabel("max"))
+        layout.addWidget(max_widget)
+        return row
+
+    def _set_numeric(self, widget, value) -> None:
+        if value is None:
+            return
+        try:
+            if isinstance(widget, QDoubleSpinBox):
+                widget.setValue(float(value))
+            else:
+                widget.setValue(int(value))
+        except (TypeError, ValueError):
+            pass
+
+    def _csv_text(self, value) -> str:
+        if isinstance(value, list):
+            return ", ".join(str(v) for v in value)
+        if value is None:
+            return ""
+        return str(value)
+
+    def _normalized_csv(self, text: str) -> str:
+        items = [part.strip() for part in (text or "").split(",") if part.strip()]
+        return ", ".join(items)
+
+    def _default_profile(self) -> dict:
+        return {
+            "auflösung": {"x": {"min": 0, "max": 99999}, "y": {"min": 0, "max": 99999}},
+            "bildrate_fps": {"min": 0.0, "max": 1000.0},
+            "videolänge_s": {"min": 0.0, "max": 100000.0},
+            "frame_rate_mode": "CFR, VFR",
+            "farbraum": "RGB, YUV, GRAY",
+            "bit_tiefe": {"min": 1, "max": 16},
+            "dateiformat": "mp4, mov, mkv, ts, mxf, avi, webm",
+        }
+
+    def _set_defaults(self) -> None:
+        self._apply_profile_data(self._default_profile())
+
+    def _apply_profile_data(self, data: dict) -> None:
+        aufloesung = data.get("auflösung") if isinstance(data.get("auflösung"), dict) else {}
+        ax = aufloesung.get("x") if isinstance(aufloesung, dict) else {}
+        ay = aufloesung.get("y") if isinstance(aufloesung, dict) else {}
+        if isinstance(ax, dict):
+            self._set_numeric(self.res_x_min, ax.get("min"))
+            self._set_numeric(self.res_x_max, ax.get("max"))
+        if isinstance(ay, dict):
+            self._set_numeric(self.res_y_min, ay.get("min"))
+            self._set_numeric(self.res_y_max, ay.get("max"))
+
+        fps = data.get("bildrate_fps") if isinstance(data.get("bildrate_fps"), dict) else {}
+        if isinstance(fps, dict):
+            self._set_numeric(self.fps_min, fps.get("min"))
+            self._set_numeric(self.fps_max, fps.get("max"))
+
+        duration = data.get("videolänge_s") if isinstance(data.get("videolänge_s"), dict) else {}
+        if isinstance(duration, dict):
+            self._set_numeric(self.duration_min, duration.get("min"))
+            self._set_numeric(self.duration_max, duration.get("max"))
+
+        bits = data.get("bit_tiefe") if isinstance(data.get("bit_tiefe"), dict) else {}
+        if isinstance(bits, dict):
+            self._set_numeric(self.bit_min, bits.get("min"))
+            self._set_numeric(self.bit_max, bits.get("max"))
+
+        self.frame_mode_edit.setText(self._csv_text(data.get("frame_rate_mode")))
+        self.color_space_edit.setText(self._csv_text(data.get("farbraum")))
+        self.format_edit.setText(self._csv_text(data.get("dateiformat")))
+
+    def _load_from_path(self, path: str, show_errors: bool = True) -> None:
+        try:
+            content = Path(path).read_text(encoding="utf-8")
+            data = json.loads(content)
+        except Exception as e:
+            if show_errors:
+                QMessageBox.critical(self, "Fehler", f"Datei konnte nicht geladen werden:\n{e}")
+            return
+        self._set_defaults()
+        self._apply_profile_data(data)
+        self.current_path = path
+        self.path_edit.setText(path)
+        self.validate_label.setText("–")
+        self.profile_changed.emit(path)
+
+    def collect_values(self) -> dict:
+        return {
+            "auflösung": {
+                "x": {"min": int(self.res_x_min.value()), "max": int(self.res_x_max.value())},
+                "y": {"min": int(self.res_y_min.value()), "max": int(self.res_y_max.value())},
+            },
+            "bildrate_fps": {
+                "min": round(float(self.fps_min.value()), 6),
+                "max": round(float(self.fps_max.value()), 6),
+            },
+            "videolänge_s": {
+                "min": round(float(self.duration_min.value()), 6),
+                "max": round(float(self.duration_max.value()), 6),
+            },
+            "frame_rate_mode": self._normalized_csv(self.frame_mode_edit.text()),
+            "farbraum": self._normalized_csv(self.color_space_edit.text()),
+            "bit_tiefe": {
+                "min": int(self.bit_min.value()),
+                "max": int(self.bit_max.value()),
+            },
+            "dateiformat": self._normalized_csv(self.format_edit.text()),
+        }
+
+    def _validate_data(self, data: dict) -> List[str]:
+        errors: List[str] = []
+        ranges = [
+            ("Auflösung X", data["auflösung"]["x"]["min"], data["auflösung"]["x"]["max"]),
+            ("Auflösung Y", data["auflösung"]["y"]["min"], data["auflösung"]["y"]["max"]),
+            ("Bildrate", data["bildrate_fps"]["min"], data["bildrate_fps"]["max"]),
+            ("Videolänge", data["videolänge_s"]["min"], data["videolänge_s"]["max"]),
+            ("Bittiefe", data["bit_tiefe"]["min"], data["bit_tiefe"]["max"]),
+        ]
+        for label, mn, mx in ranges:
+            if mn > mx:
+                errors.append(f"Min darf nicht größer als Max sein ({label})")
+
+        for label, text in [
+            ("Frame-Rate-Modus", data.get("frame_rate_mode")),
+            ("Farbraum", data.get("farbraum")),
+            ("Dateiformat", data.get("dateiformat")),
+        ]:
+            if not text:
+                errors.append(f"{label} darf nicht leer sein")
+
+        return errors
 
     # --- Actions ---
     def create_new(self):
-        template = {
-            "auflösung": {"x": {"min": 0, "max": 99999}, "y": {"min": 0, "max": 99999}},
-            "bildrate_fps": {"min": 0, "max": 1000},
-            "videolänge_s": {"min": 0, "max": 100000},
-            "frame_rate_mode": ["CFR", "VFR"],
-            "farbraum": ["RGB", "YUV", "GRAY"],
-            "bit_tiefe": {"min": 1, "max": 16},
-            "dateiformat": ["mp4", "mov", "mkv", "ts", "mxf", "avi", "webm"],
-        }
-        self.editor.setPlainText(json.dumps(template, ensure_ascii=False, indent=2))
+        self._set_defaults()
         self.validate_label.setText("–")
         self.current_path = None
         self.path_edit.setText("")
@@ -251,22 +415,17 @@ class ProfileEditor(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "Zielwerte öffnen", str(Path.home()), "JSON (*.json)")
         if not path:
             return
-        try:
-            content = Path(path).read_text(encoding="utf-8")
-            json.loads(content)  # sanity check
-            self.editor.setPlainText(content)
-            self.current_path = path
-            self.path_edit.setText(path)
-            self.profile_changed.emit(path)
-            self.validate_label.setText("–")
-        except Exception as e:
-            QMessageBox.critical(self, "Fehler", f"Datei konnte nicht geladen werden:\n{e}")
+        self._load_from_path(path)
 
     def save(self):
         if not self.current_path:
             return self.save_as()
+        data = self.collect_values()
+        errors = self._validate_data(data)
+        if errors:
+            QMessageBox.warning(self, "Ungültige Eingaben", "\n".join(errors))
+            return
         try:
-            data = json.loads(self.editor.toPlainText())
             Path(self.current_path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             self.validate_label.setText("Gespeichert ✔")
             self.profile_changed.emit(self.current_path)
@@ -277,8 +436,12 @@ class ProfileEditor(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "Zielwerte speichern unter…", str(Path.home()/"zielwerte.json"), "JSON (*.json)")
         if not path:
             return
+        data = self.collect_values()
+        errors = self._validate_data(data)
+        if errors:
+            QMessageBox.warning(self, "Ungültige Eingaben", "\n".join(errors))
+            return
         try:
-            data = json.loads(self.editor.toPlainText())
             Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             self.current_path = path
             self.path_edit.setText(path)
@@ -288,24 +451,12 @@ class ProfileEditor(QWidget):
             QMessageBox.critical(self, "Fehler", f"Speichern fehlgeschlagen:\n{e}")
 
     def validate(self):
-        try:
-            data = json.loads(self.editor.toPlainText())
-            required = [
-                "auflösung",
-                "bildrate_fps",
-                "videolänge_s",
-                "frame_rate_mode",
-                "farbraum",
-                "bit_tiefe",
-                "dateiformat",
-            ]
-            missing = [k for k in required if k not in data]
-            if missing:
-                self.validate_label.setText(f"Fehlende Felder: {', '.join(missing)}")
-                return
-            self.validate_label.setText("Valid JSON ✔")
-        except Exception as e:
-            self.validate_label.setText(f"Ungültig: {e}")
+        data = self.collect_values()
+        errors = self._validate_data(data)
+        if errors:
+            self.validate_label.setText("; ".join(errors))
+        else:
+            self.validate_label.setText("Valid ✔")
 
     def get_current_profile_path(self) -> Optional[str]:
         return self.current_path
