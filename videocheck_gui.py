@@ -24,9 +24,8 @@ import ast
 import os
 import sys
 import json
-import subprocess
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QRect
 from PySide6.QtGui import QAction, QIcon, QColor, QBrush, QFont, QPixmap, QImage
@@ -62,7 +61,7 @@ from PySide6.QtWidgets import (
     QSlider,
 )
 
-APP_TITLE = "Matchwinners Auditor"
+APP_TITLE = "MW Auditor"
 
 # --- Ressourcenpfade (PyInstaller-kompatibel) ---
 def resource_path(rel_path: str) -> str:
@@ -72,7 +71,6 @@ def resource_path(rel_path: str) -> str:
         base_path = Path(__file__).parent
     return str((base_path / rel_path).resolve())
 
-CHECK_MEDIA = resource_path("check_media.py")
 DEFAULT_PROFILE = resource_path("zielwerte.json")  # optional
 EMBLEM_PATH = resource_path("mw-emblem.svg")       # optional (Header/Window-Icon)
 
@@ -87,6 +85,7 @@ if FFMPEG_BUNDLE_DIR.exists():
     os.environ.setdefault("AV_LOG_FORCE_NOCOLOR", "1")
 
 import av
+import check_media
 
 SUPPORTED_EXTS = {".mp4", ".mov", ".mkv", ".ts", ".mxf", ".avi", ".webm"}
 
@@ -241,7 +240,7 @@ def _actual_from_info_or_report(key: str, info: str, report: Optional[dict]) -> 
 
 # ---------------- Worker -----------------
 class Worker(QThread):
-    finished_one = Signal(str, int, object)  # payload enthält u.a. Fehlermetriken
+    finished_one = Signal(str, int, object)
     finished_all = Signal()
 
     def __init__(self, files: List[str], profile_path: Optional[str]):
@@ -255,50 +254,55 @@ class Worker(QThread):
             self.finished_one.emit(f, code, payload)
         self.finished_all.emit()
 
-    def run_check(self, filepath: str) -> Tuple[int, dict]:
-        # python check_media.py <file> [--profile <json>] --summary-only
-        cmd = [sys.executable, CHECK_MEDIA, filepath, "--summary-only"]
-        if self.profile_path:
-            cmd.extend(["--profile", self.profile_path])
+    def _load_profile_spec(self) -> Optional[Dict[str, Any]]:
+        if not self.profile_path:
+            return None
         try:
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
+            return json.loads(Path(self.profile_path).read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def run_check(self, filepath: str) -> Tuple[int, dict]:
+        profile_spec = self._load_profile_spec()
+        try:
+            report_obj, _media_path, _report_path = check_media.run_validation(
+                filepath,
+                profile_spec,
+                media_out=None,
+                report_out=None,
+                out_dir=None,
+                pretty=False,
+                hash_algo="sha256",
             )
-            out = proc.stdout or ""
-            code = proc.returncode
-            summary = extract_brief_summary(out)
-            report = self._load_validation_report(filepath)
-            fail_ratio, fail_total = self._compute_fail_ratio(report)
-            clipboard_text = self._build_clipboard_text(filepath, code, report, summary, fail_ratio)
-            payload = {
-                "summary": summary,
-                "report": report,
-                "fail_ratio": fail_ratio,
-                "total": fail_total,
-                "clipboard": clipboard_text,
-            }
-            return code, payload
-        except Exception as e:
+        except Exception as exc:
+            message = str(exc)
             return 99, {
-                "summary": f"ERROR: {e}",
+                "summary": f"ERROR: {message}",
                 "report": None,
                 "fail_ratio": "-",
                 "total": 0,
-                "clipboard": f"Prüfung konnte nicht durchgeführt werden: {e}",
+                "clipboard": f"Prüfung konnte nicht durchgeführt werden: {message}",
             }
 
-    def _load_validation_report(self, filepath: str) -> Optional[dict]:
-        try:
-            report_path = Path(filepath).parent / f"{Path(filepath).name}.validationreport.json"
-            if report_path.exists():
-                return json.loads(report_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-        return None
+        fail_ratio, fail_total = self._compute_fail_ratio(report_obj)
+        status = report_obj.get("validation", {}).get("status") or "unbekannt"
+        summary = f"Status: {status}"
+        exit_code = 0 if status == "passend" else 2
+        clipboard_text = self._build_clipboard_text(
+            filepath,
+            exit_code,
+            report_obj,
+            summary,
+            fail_ratio,
+        )
+        payload = {
+            "summary": summary,
+            "report": report_obj,
+            "fail_ratio": fail_ratio,
+            "total": fail_total,
+            "clipboard": clipboard_text,
+        }
+        return exit_code, payload
 
     def _compute_fail_ratio(self, report: Optional[dict]) -> Tuple[str, int]:
         if not report:
@@ -378,25 +382,6 @@ class Worker(QThread):
             lines.extend(formatted_passed)
 
         return "\n".join(lines)
-
-
-def extract_brief_summary(output: str) -> str:
-    lines = [ln.strip() for ln in (output or "").splitlines() if ln.strip()]
-    # Summary-Block extrahieren
-    summary_lines = []
-    take = False
-    for ln in lines:
-        if ln.upper().startswith("SUMMARY"):
-            take = True
-            continue
-        if take:
-            if any(ln.upper().startswith(h) for h in ["DETAIL", "DEBUG", "TRACE"]):
-                break
-            summary_lines.append(ln)
-    if summary_lines:
-        s = " ".join(summary_lines)
-        return s[:600]
-    return " ".join(lines[:3])[:600]
 
 
 # --------------- UI Widgets ---------------
@@ -1396,9 +1381,6 @@ class MainWindow(QMainWindow):
 
     def run_checks(self):
         if not self.files:
-            return
-        if not Path(CHECK_MEDIA).exists():
-            QMessageBox.critical(self, "Fehler", f"check_media.py nicht gefunden unter\n{CHECK_MEDIA}")
             return
         # Reset Status
         for row in range(self.check_tab.table.rowCount()):

@@ -8,6 +8,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.venv-build/
+*.spec
+
+# FFmpeg downloads (created by build_app.sh)
+bundle/
 .eggs/
 
 # Virtual Environments

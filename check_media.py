@@ -7,7 +7,7 @@ import re
 import sys
 import hashlib
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Union
 
 import av  # pip install av
 import statistics
@@ -314,6 +314,75 @@ def validate_full(media_profile: Dict[str, Any], profile_spec: Optional[Dict[str
     status = "passend" if (overall_ok or not counted_any) else "failed"
     return {"status": status, "details": {k: details[k] for k in CRITERIA_ORDER}}
 
+
+def _write_json(target: Path, payload: Any, pretty: bool, label: Optional[str] = None) -> bool:
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2 if pretty else None)
+        return True
+    except PermissionError:
+        if label:
+            print(f"Warnung: Kein Schreibzugriff für {label} '{target}'. Überspringe.")
+        else:
+            print(f"Warnung: Kein Schreibzugriff für '{target}'. Überspringe.")
+    except OSError as e:
+        if label:
+            print(f"Warnung: Konnte {label} '{target}' nicht schreiben: {e}. Überspringe.")
+        else:
+            print(f"Warnung: Konnte '{target}' nicht schreiben: {e}. Überspringe.")
+    return False
+
+
+def run_validation(
+    input_path: Union[str, Path],
+    profile_spec: Optional[Dict[str, Any]],
+    *,
+    media_out: Optional[Union[str, Path]] = None,
+    report_out: Optional[Union[str, Path]] = None,
+    out_dir: Optional[Union[str, Path]] = None,
+    pretty: bool = False,
+    hash_algo: str = "sha256",
+) -> Tuple[Dict[str, Any], Path, Path]:
+    in_path = Path(input_path)
+
+    if out_dir is not None:
+        default_out_dir = Path(out_dir)
+    else:
+        try:
+            default_out_dir = in_path.resolve().parent
+        except FileNotFoundError:
+            default_out_dir = in_path.parent if in_path.parent != Path("") else Path.cwd()
+    if not default_out_dir:
+        default_out_dir = Path.cwd()
+
+    if media_out is None:
+        media_path = default_out_dir / f"{in_path.name}.mediaprofile.json"
+    else:
+        media_path = Path(media_out)
+
+    if report_out is None:
+        report_path = default_out_dir / f"{in_path.name}.validationreport.json"
+    else:
+        report_path = Path(report_out)
+
+    media_profile = build_media_profile(in_path, hash_algo)
+    _write_json(media_path, media_profile, pretty, "Media-Profil")
+
+    validation = validate_full(media_profile, profile_spec)
+
+    report_obj = {
+        "filename": media_profile.get("filename"),
+        "file_id": media_profile.get("file_id"),
+        "media_profile": media_profile,
+        "validation": validation,
+    }
+
+    _write_json(report_path, report_obj, pretty, "Validation-Report")
+
+    return report_obj, media_path, report_path
+
+
 # ---------- Main ----------
 
 def main():
@@ -332,7 +401,6 @@ def main():
     args = ap.parse_args()
 
     in_path = Path(args.input)
-    base_name = in_path.name
 
     profile_path = Path(args.profile)
     if not profile_path.exists():
@@ -345,55 +413,20 @@ def main():
         print(f"Fehler: Zielwerte-Datei '{profile_path}' konnte nicht geladen werden: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if args.out_dir:
-        default_out_dir = Path(args.out_dir)
-    else:
-        try:
-            default_out_dir = in_path.resolve().parent
-        except FileNotFoundError:
-            default_out_dir = in_path.parent if in_path.parent != Path("") else Path.cwd()
-    default_out_dir = default_out_dir if default_out_dir else Path.cwd()
-
-    media_out = Path(args.media_out) if args.media_out else default_out_dir / f"{base_name}.mediaprofile.json"
-    report_out = Path(args.report_out) if args.report_out else default_out_dir / f"{base_name}.validationreport.json"
-
-    if not args.summary_only:
-        print(f"Schreibe Media-Profil nach: {media_out}")
-        print(f"Schreibe Validation-Report nach: {report_out}")
-
-    # Media-Profil inkl. Hash erstellen
-    media_profile = build_media_profile(in_path, args.hash_algo)
-
-    # Media-Profil schreiben
-    def _write_json(target: Path, payload: Any, label: str) -> bool:
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2 if args.pretty else None)
-            return True
-        except PermissionError:
-            print(f"Warnung: Kein Schreibzugriff für {label} '{target}'. Überspringe.")
-        except OSError as e:
-            print(f"Warnung: Konnte {label} '{target}' nicht schreiben: {e}. Überspringe.")
-        return False
-
-    _write_json(media_out, media_profile, "Media-Profil")
-
-    # Profil laden (optional) & Report bauen
-    validation = validate_full(media_profile, profile_spec)
-
-    report_obj = {
-        "filename": media_profile.get("filename"),
-        "file_id": media_profile.get("file_id"),
-        "media_profile": media_profile,
-        "validation": validation
-    }
-
-    # Report schreiben
-    _write_json(report_out, report_obj, "Validation-Report")
+    report_obj, media_out_path, report_out_path = run_validation(
+        in_path,
+        profile_spec,
+        media_out=Path(args.media_out) if args.media_out else None,
+        report_out=Path(args.report_out) if args.report_out else None,
+        out_dir=Path(args.out_dir) if args.out_dir else None,
+        pretty=args.pretty,
+        hash_algo=args.hash_algo,
+    )
 
     # Konsole
     if not args.summary_only:
+        print(f"Schreibe Media-Profil nach: {media_out_path}")
+        print(f"Schreibe Validation-Report nach: {report_out_path}")
         print(json.dumps(report_obj, ensure_ascii=False, indent=2 if args.pretty else None))
 
     if args.summary_only:
