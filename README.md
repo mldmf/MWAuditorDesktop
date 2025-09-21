@@ -1,159 +1,83 @@
-# check_media.py — Video Profiling & Validation (PyAV)
+# MW Auditor
 
-`check_media.py` liest ein **Video tatsächlich ein** (keine reinen Metadaten), misst technische Kennwerte (Container, Auflösung, FPS, CFR/VFR, Farbraum, Bittiefe), erstellt einen **Hash** (als eindeutige ID), und schreibt zwei JSON-Dateien:
+MW Auditor ist ein macOS- und Python-Tool zur automatisierten Prüfung von Videodateien. Es kombiniert das CLI-Script `check_media.py` mit einer PySide6-basierten Oberfläche (`videocheck_gui.py`). Die App liefert Media-Profile, Validierungsberichte und bietet eine integrierte Vorschau mit Frame-Steuerung, Zoom, Cropping-Screenshots und einer redaktionell verwertbaren Fehlermeldung.
 
-1. `<input_name>.mediaprofile.json` – nur Messwerte  
-2. `<input_name>.validationreport.json` – Messwerte **+** Validierung gegen Zielwerte
+## Funktionsumfang
 
-Die Ausgabe in der Konsole ist farbig (grün/rot) und enthält eine Kurz-Zusammenfassung der Validierung.
+- **Drag & Drop / Dateiauswahl**: Mehrere Videos einfügen, Status-Überblick (Pass/Fail, Fehlerquote) und JSON-Export.
+- **Zielwerte-Editor**: Zielwerte (`zielwerte.json`) komfortabel anpassen und validieren.
+- **Video-Vorschau**: Frame-by-Frame, Play/Pause, Zoom/Pan, Timeline-Slider, Screenshot (PNG & Clipboard, gezoomter Ausschnitt) und Mail-tauglicher Prüfbericht.
+- **Kommandozeile**: `check_media.py` erzeugt Media-Profile & Validierungsreports, prüft gegen Zielwerte und lässt sich aus Python wiederverwenden (`run_validation`).
 
----
+## Schnellstart (Python)
 
-## Features
-
-- 🧪 **Messung via Dekodierung** mit [PyAV] (FFmpeg-Bindings), keine blinde Metadaten-Übernahme  
-- 🧾 **Zwei JSON-Outputs**: Media-Profil & Validierungsreport  
-- 🔐 **Hash/ID** des Videofiles (Standard `sha256`)  
-- 🎯 **Validierung** gegen frei definierbare Zielwerte (Ranges & Whitelists)  
-- 🎛️ **CFR/VFR-Erkennung** aus tatsächlichen Frame-Abständen  
-- 🌈 **Farbige Konsole** und deterministische Reihenfolge der Prüfungen  
-- 📂 Flexible Ausgabeorte: CWD, gemeinsames `--out-dir`, oder explizit je Datei
-
-[PyAV]: https://pyav.org/
-
----
-
-## Systemvoraussetzungen
-
-- macOS (Intel oder Apple Silicon)
-- **Python 3.10+**
-- **FFmpeg** (Systembibliotheken), z. B. via Homebrew
-
----
-
-## Installation auf macOS (genau)
-
-1) **Homebrew (falls nicht vorhanden)**  
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-2) **FFmpeg installieren**  
-```bash
-brew install ffmpeg
-```
-
-3) **Python & venv einrichten**  
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -V
-```
-
-4) **Dependencies installieren**  
-`requirements.txt`:
-```txt
-av>=11.0.0,<13.0.0
-```
-```bash
+python3 -m pip install --upgrade pip
 pip install -r requirements.txt
+python3 videocheck_gui.py
 ```
 
----
+> Hinweis: Für die CLI benötigt `check_media.py` zwingend eine Zielwerte-Datei (`zielwerte.json`).
 
-## Quick Start
+## Prebuilt macOS-App nutzen
+
+1. ZIP von `MW_Auditor.app` entpacken.
+2. `MW_Auditor.app` nach `/Applications` ziehen (empfohlen, sonst blockt Gatekeeper).
+3. Beim ersten Start ggf. Rechtsklick → **Öffnen** (falls noch nicht signiert/notarisiert).
+4. Videos prüfen – Media-/Report-JSON liegen neben den jeweiligen Videodateien.
+
+## Build-Anleitung (macOS)
+
+Voraussetzungen: `python3`, `curl`, `unzip`, Apple Command Line Tools.
 
 ```bash
-python3 check_media.py /Pfad/zum/video.mp4 --pretty
+# sauberes Build-Venv + PyInstaller
+rm -rf .venv-build
+./build_app.sh
 ```
 
-Outputs im aktuellen Arbeitsverzeichnis:
-- `video.mp4.mediaprofile.json`
-- `video.mp4.validationreport.json`
+Das Skript erzeugt `dist/MW_Auditor.app` und lädt automatisch statische FFmpeg-Binaries (`bundle/ffmpeg/...`).
 
----
-
-## CLI-Referenz
+### Signieren & notarisiertes DMG erstellen
 
 ```bash
-python3 check_media.py INPUT
-  [--profile ZIELWERTE.json]
-  [--pretty]
-  [--out-dir DIR]
-  [--media-out PFAD.json]
-  [--report-out PFAD.json]
-  [--hash-algo md5|sha1|sha256|sha512]
+./sign_and_package.sh \
+  -i "Developer ID Application: Dein Name (TEAMID12345)" \
+  -p mein-notarytool-profile   # optional, falls notarytool konfiguriert
 ```
 
-**Exit Codes**  
-- `0` → passend  
-- `2` → failed
+Ergebnis: `dist/MW_Auditor.app` (signiert) und `dist/MW_Auditor.dmg` (optional notarisiert + gestapelt).
 
----
-
-## Validierungs-Config (Zielwerte.json)
-
-```json
-{
-  "dateiformat": "mp4/mov,matroska/webm",
-  "farbraum": "RGB,YUV",
-  "bit_tiefe": { "min": 8, "max": 8 },
-  "bildrate_fps": { "min": 29.9, "max": 30.1 },
-  "frame_rate_mode": "CFR", 
-  "auflösung": {
-    "x": { "min": 1920, "max": 1920 },
-    "y": { "min": 1080, "max": 1080 }
-  }
-}
+**DMG zippen:**
+```bash
+ditto -c -k --sequesterRsrc --keepParent dist/MW_Auditor.dmg dist/MW_Auditor.dmg.zip
 ```
 
----
+## Slack-Message (Kurzfassung)
 
-## Output-Beispiele
+> siehe eigenständige Nachricht unten – enthält Download-/Start-Hinweise für Kolleg:innen.
 
-### `<input>.mediaprofile.json`
-```json
-{
-  "filename": "video.mp4",
-  "file_id": { "algorithm": "sha256", "hash": "ab12...ef" },
-  "quelle": "/Pfad/video.mp4",
-  "lesbar": true,
-  "non_zero_bytes": true,
-  "dateiformat": "mp4/mov",
-  "auflösung": { "x": 1920, "y": 1080 },
-  "bildrate_fps": 29.97003,
-  "frame_rate_mode": "CFR",
-  "farbraum": "YUV",
-  "bit_tiefe": 8
-}
+## Projektstruktur
+
+```
+.
+├─ videocheck_gui.py        # PySide6 GUI (MW Auditor)
+├─ check_media.py           # Media-Analyse + Validierung (CLI & import)
+├─ requirements.txt         # av, PySide6, numpy
+├─ build_app.sh             # PyInstaller-Build inkl. FFmpeg-Download
+├─ sign_and_package.sh      # Codesign + DMG + optionale Notarisierung
+├─ bundle/ffmpeg/           # ffmpeg/ffprobe (wird bei Bedarf heruntergeladen)
+├─ zielwerte.json           # Beispiel-Zielwerte (optional)
+└─ media/                   # Beispiel-Videos (optional)
 ```
 
-### `<input>.validationreport.json`
-```json
-{
-  "filename": "video.mp4",
-  "file_id": { "algorithm": "sha256", "hash": "ab12...ef" },
-  "media_profile": { ... },
-  "validation": {
-    "status": "passend",
-    "details": {
-      "dateiformat":   { "ok": true,  "info": "'mp4/mov' erlaubt" },
-      "farbraum":      { "ok": true,  "info": "'YUV' erlaubt" },
-      "bit_tiefe":     { "ok": true,  "info": "min=8, max=8, wert=8" },
-      "bildrate_fps":  { "ok": true,  "info": "min=29.9, max=30.1, wert=29.97003" },
-      "frame_rate_mode": { "ok": true, "info": "'CFR' erlaubt" },
-      "auflösung.x":   { "ok": true,  "info": "min=1920, max=1920, wert=1920" },
-      "auflösung.y":   { "ok": true,  "info": "min=1080, max=1080, wert=1080" }
-    }
-  }
-}
-```
+## Troubleshooting
 
----
+- **App startet nicht / „kann nicht geöffnet werden“**: Gatekeeper → App in `/Applications` kopieren oder notarisiertes DMG verwenden.
+- **ModuleNotFoundError (PySide6/numpy/av)**: `pip install -r requirements.txt` im aktiven Venv ausführen.
+- **FFmpeg nicht gefunden**: sicherstellen, dass `bundle/ffmpeg/ffmpeg` und `ffprobe` vorhanden sind (Build-Skript lädt sie automatisch).
+- **CLI verlangt Zielwerte**: `python check_media.py <video> --profile zielwerte.json --summary-only` – ohne `--profile` bricht das Script ab.
 
-## .gitignore
-
-```gitignore
-*.mediaprofile.json
-*.validationreport.json
-```
+Viel Spaß mit MW Auditor! Verbesserungswünsche bitte direkt hier im Repo aufmachen.
