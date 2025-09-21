@@ -28,8 +28,6 @@ import subprocess
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 
-import av
-
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QRect
 from PySide6.QtGui import QAction, QIcon, QColor, QBrush, QFont, QPixmap, QImage
 from PySide6.QtWidgets import (
@@ -61,7 +59,6 @@ from PySide6.QtWidgets import (
     QToolButton,
     QStyle,
     QSizePolicy,
-    QFileDialog,
     QSlider,
 )
 
@@ -78,6 +75,18 @@ def resource_path(rel_path: str) -> str:
 CHECK_MEDIA = resource_path("check_media.py")
 DEFAULT_PROFILE = resource_path("zielwerte.json")  # optional
 EMBLEM_PATH = resource_path("mw-emblem.svg")       # optional (Header/Window-Icon)
+
+FFMPEG_BUNDLE_DIR = Path(resource_path("ffmpeg"))
+if FFMPEG_BUNDLE_DIR.exists():
+    ffmpeg_bin = FFMPEG_BUNDLE_DIR / "ffmpeg"
+    ffprobe_bin = FFMPEG_BUNDLE_DIR / "ffprobe"
+    if ffmpeg_bin.exists():
+        os.environ.setdefault("FFMPEG_BINARY", str(ffmpeg_bin))
+    if ffprobe_bin.exists():
+        os.environ.setdefault("FFPROBE_BINARY", str(ffprobe_bin))
+    os.environ.setdefault("AV_LOG_FORCE_NOCOLOR", "1")
+
+import av
 
 SUPPORTED_EXTS = {".mp4", ".mov", ".mkv", ".ts", ".mxf", ".avi", ".webm"}
 
