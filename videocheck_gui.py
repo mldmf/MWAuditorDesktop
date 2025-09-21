@@ -26,10 +26,12 @@ import sys
 import json
 import subprocess
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QAction, QIcon, QColor, QBrush, QFont
+import av
+
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtGui import QAction, QIcon, QColor, QBrush, QFont, QPixmap, QImage
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -50,6 +52,15 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QSpinBox,
     QDoubleSpinBox,
+    QListWidget,
+    QListWidgetItem,
+    QGraphicsView,
+    QGraphicsScene,
+    QGraphicsPixmapItem,
+    QSplitter,
+    QToolButton,
+    QStyle,
+    QSizePolicy,
 )
 
 APP_TITLE = "Matchwinners Auditor"
@@ -716,6 +727,342 @@ class ProfileEditor(QWidget):
         return self.current_path
 
 
+class FrameLoader(QThread):
+    frame_ready = Signal(int, QImage)
+    metadata_ready = Signal(float)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, path: str):
+        super().__init__()
+        self.path = path
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            container = av.open(self.path)
+        except av.AVError as exc:
+            self.failed.emit(f"Video konnte nicht geöffnet werden: {exc}")
+            self.finished.emit()
+            return
+
+        fps = 25.0
+        try:
+            stream = next((s for s in container.streams if s.type == "video"), None)
+            if stream is None:
+                raise ValueError("Kein Videostream gefunden")
+
+            if stream.average_rate:
+                try:
+                    fps = float(stream.average_rate)
+                except Exception:
+                    fps = float(stream.average_rate.numerator) / float(stream.average_rate.denominator)
+            elif stream.time_base and stream.duration:
+                tb = float(stream.time_base)
+                if tb > 0 and stream.duration:
+                    duration_sec = float(stream.duration) * tb
+                    if duration_sec > 0 and stream.frames:
+                        fps = max(1.0, stream.frames / duration_sec)
+            fps = max(1.0, fps)
+            self.metadata_ready.emit(fps)
+
+            for index, frame in enumerate(container.decode(stream)):
+                if self._stop:
+                    break
+                rgb = frame.to_ndarray(format="rgb24")
+                height, width, _ = rgb.shape
+                image = QImage(rgb.data, width, height, 3 * width, QImage.Format_RGB888).copy()
+                self.frame_ready.emit(index, image)
+        except Exception as exc:
+            if not self._stop:
+                self.failed.emit(str(exc))
+        finally:
+            container.close()
+            self.finished.emit()
+
+
+class VideoPreviewTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.items: Dict[str, QListWidgetItem] = {}
+        self.results: Dict[str, Dict[str, str]] = {}
+        self.frames: List[QImage] = []
+        self.fps: float = 25.0
+        self.loader: Optional[FrameLoader] = None
+        self.current_index: int = 0
+        self.zoom_factor: float = 1.0
+        self.pixmap_item: Optional[QGraphicsPixmapItem] = None
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._advance_frame)
+
+        root = QVBoxLayout(self)
+        splitter = QSplitter(Qt.Horizontal)
+        root.addWidget(splitter)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setMinimumWidth(240)
+        self.list_widget.currentItemChanged.connect(self._handle_selection_changed)
+        splitter.addWidget(self.list_widget)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(1, 1)
+
+        self.scene = QGraphicsScene(self)
+        self.view = QGraphicsView(self.scene)
+        self.view.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.view.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right_layout.addWidget(self.view, 1)
+
+        controls = QHBoxLayout()
+
+        self.prev_btn = QToolButton()
+        self.prev_btn.setText("⟨ Frame")
+        self.prev_btn.clicked.connect(self.step_previous)
+        controls.addWidget(self.prev_btn)
+
+        self.play_btn = QToolButton()
+        self.play_btn.setText("Play")
+        self.play_btn.clicked.connect(self.toggle_playback)
+        controls.addWidget(self.play_btn)
+
+        self.next_btn = QToolButton()
+        self.next_btn.setText("Frame ⟩")
+        self.next_btn.clicked.connect(self.step_next)
+        controls.addWidget(self.next_btn)
+
+        controls.addSpacing(20)
+
+        self.zoom_out_btn = QToolButton()
+        self.zoom_out_btn.setText("Zoom -")
+        self.zoom_out_btn.clicked.connect(lambda: self.adjust_zoom(1 / 1.25))
+        controls.addWidget(self.zoom_out_btn)
+
+        self.zoom_reset_btn = QToolButton()
+        self.zoom_reset_btn.setText("Original")
+        self.zoom_reset_btn.clicked.connect(self.reset_zoom)
+        controls.addWidget(self.zoom_reset_btn)
+
+        self.zoom_in_btn = QToolButton()
+        self.zoom_in_btn.setText("Zoom +")
+        self.zoom_in_btn.clicked.connect(lambda: self.adjust_zoom(1.25))
+        controls.addWidget(self.zoom_in_btn)
+
+        controls.addStretch()
+
+        right_layout.addLayout(controls)
+
+        self.info_label = QLabel("Keine Datei geladen")
+        right_layout.addWidget(self.info_label)
+
+        self.list_widget.setCurrentRow(-1)
+
+    # --- Public API ---
+    def register_file(self, filepath: str) -> None:
+        if filepath in self.items:
+            return
+        item = QListWidgetItem(f"{Path(filepath).name} — WARTET")
+        item.setData(Qt.UserRole, filepath)
+        self.list_widget.addItem(item)
+        self.items[filepath] = item
+        self.results[filepath] = {"status": "WARTET", "fail_ratio": "-", "clipboard": ""}
+
+    def set_result(self, filepath: str, status: str, payload: Optional[dict]) -> None:
+        if filepath not in self.items:
+            self.register_file(filepath)
+        fail_ratio = "-"
+        clipboard = ""
+        if isinstance(payload, dict):
+            fail_ratio = payload.get("fail_ratio", "-") or "-"
+            clipboard = payload.get("clipboard", "")
+        self.results[filepath] = {
+            "status": status,
+            "fail_ratio": fail_ratio,
+            "clipboard": clipboard,
+        }
+        self._refresh_item(filepath)
+
+    def clear(self) -> None:
+        self.timer.stop()
+        self.list_widget.clear()
+        self.scene.clear()
+        self.pixmap_item = None
+        self.items.clear()
+        self.results.clear()
+        self._stop_loader()
+        self.frames = []
+        self.info_label.setText("Keine Datei geladen")
+
+    # --- Slots ---
+    def toggle_playback(self) -> None:
+        if not self.frames:
+            return
+        if self.timer.isActive():
+            self.timer.stop()
+            self.play_btn.setText("Play")
+            return
+        interval = int(1000 / self.fps) if self.fps else 40
+        self.timer.start(max(10, interval))
+        self.play_btn.setText("Pause")
+
+    def step_next(self) -> None:
+        self._advance_frame(step=1, loop=False)
+
+    def step_previous(self) -> None:
+        self._advance_frame(step=-1, loop=False)
+
+    def adjust_zoom(self, factor: float) -> None:
+        self.zoom_factor *= factor
+        self.zoom_factor = max(0.1, min(self.zoom_factor, 10.0))
+        self._apply_zoom()
+
+    def reset_zoom(self) -> None:
+        self.zoom_factor = 1.0
+        self._apply_zoom()
+
+    # --- Internals ---
+    def _handle_selection_changed(self, current: Optional[QListWidgetItem], _previous: Optional[QListWidgetItem]) -> None:
+        if not current:
+            return
+        filepath = current.data(Qt.UserRole)
+        if not filepath:
+            return
+        self.load_clip(str(filepath))
+
+    def load_clip(self, filepath: str) -> None:
+        self.timer.stop()
+        self.play_btn.setText("Play")
+        self._stop_loader()
+        self.frames = []
+        self.current_index = 0
+        self.zoom_factor = 1.0
+        self.scene.clear()
+        self.pixmap_item = None
+        self.info_label.setText("Lade Video…")
+        self.loader = FrameLoader(filepath)
+        self.loader.metadata_ready.connect(self._on_metadata_ready)
+        self.loader.frame_ready.connect(self._on_frame_ready)
+        self.loader.failed.connect(self._on_loader_failed)
+        self.loader.finished.connect(self._on_loader_finished)
+        self.loader.start()
+
+    def _advance_frame(self, step: int = 1, loop: bool = True) -> None:
+        if not self.frames:
+            self.timer.stop()
+            self.play_btn.setText("Play")
+            return
+        frame_count = len(self.frames)
+        self.current_index += step
+        if self.current_index >= frame_count:
+            if loop:
+                self.current_index = 0
+            else:
+                self.current_index = frame_count - 1
+                self.timer.stop()
+                self.play_btn.setText("Play")
+        elif self.current_index < 0:
+            if loop:
+                self.current_index = frame_count - 1
+            else:
+                self.current_index = 0
+        self._show_current_frame()
+
+    def _show_current_frame(self) -> None:
+        if not self.frames:
+            return
+        if self.current_index >= len(self.frames):
+            self.current_index = max(0, len(self.frames) - 1)
+        image = self.frames[self.current_index]
+        pixmap = QPixmap.fromImage(image)
+        if self.pixmap_item is None:
+            self.scene.clear()
+            self.pixmap_item = self.scene.addPixmap(pixmap)
+        else:
+            self.pixmap_item.setPixmap(pixmap)
+        self.scene.setSceneRect(self.pixmap_item.boundingRect())
+        self._apply_zoom()
+        status = ""
+        current_item = self.list_widget.currentItem()
+        if current_item:
+            filepath = current_item.data(Qt.UserRole)
+            status = self.results.get(filepath, {}).get("status", "")
+        self._update_info_label(status)
+
+    def _apply_zoom(self) -> None:
+        self.view.resetTransform()
+        self.view.scale(self.zoom_factor, self.zoom_factor)
+
+    def _refresh_item(self, filepath: str) -> None:
+        item = self.items.get(filepath)
+        if not item:
+            return
+        result = self.results.get(filepath, {})
+        status = result.get("status", "WARTET")
+        fail_ratio = result.get("fail_ratio", "-")
+        name = Path(filepath).name
+        if status == "PASS":
+            text = f"{name} — PASS"
+            item.setForeground(QBrush(QColor(34, 139, 34)))
+        elif status == "FAIL":
+            text = f"{name} — FAIL ({fail_ratio})"
+            item.setForeground(QBrush(QColor(178, 34, 34)))
+        else:
+            text = f"{name} — {status}"
+            item.setForeground(QBrush())
+        item.setText(text)
+
+    def _update_info_label(self, status: str) -> None:
+        if not self.frames:
+            self.info_label.setText("Keine Datei geladen")
+            return
+        frame_count = len(self.frames)
+        time_pos = self.current_index / self.fps if self.fps else 0.0
+        status_text = status or ""
+        info_parts = [
+            f"Frame {self.current_index + 1}/{frame_count}",
+            f"Zeit {time_pos:.2f}s",
+        ]
+        if status_text:
+            info_parts.append(f"Status: {status_text}")
+        self.info_label.setText(" | ".join(info_parts))
+
+    def _stop_loader(self) -> None:
+        if self.loader and self.loader.isRunning():
+            self.loader.stop()
+            self.loader.wait(200)
+        self.loader = None
+
+    def _on_metadata_ready(self, fps: float) -> None:
+        self.fps = max(1.0, fps)
+
+    def _on_frame_ready(self, index: int, image: QImage) -> None:
+        if index >= len(self.frames):
+            self.frames.append(image)
+        else:
+            self.frames[index] = image
+        if index == self.current_index or len(self.frames) == 1:
+            self._show_current_frame()
+
+    def _on_loader_failed(self, message: str) -> None:
+        self.frames = []
+        self.scene.clear()
+        self.pixmap_item = None
+        self.info_label.setText(message)
+
+    def _on_loader_finished(self) -> None:
+        if not self.frames:
+            return
+        if self.current_index >= len(self.frames):
+            self.current_index = len(self.frames) - 1
+            self._show_current_frame()
+
 class CheckTab(QWidget):
     def __init__(self, logo_path: Optional[str]):
         super().__init__()
@@ -800,6 +1147,9 @@ class MainWindow(QMainWindow):
         self.profile_tab.profile_changed.connect(self.set_active_profile)
         tabs.addTab(self.profile_tab, "Zielwerte")
 
+        self.preview_tab = VideoPreviewTab()
+        tabs.addTab(self.preview_tab, "Vorschau")
+
         self.statusBar()  # Statusleiste für kurze Hinweise anlegen
 
         # Verkabelung Check-Tab
@@ -831,6 +1181,7 @@ class MainWindow(QMainWindow):
             if f not in self.files:
                 self.files.append(f)
                 self.add_row(f)
+                self.preview_tab.register_file(f)
                 added += 1
         if added:
             self.run_checks()
@@ -853,6 +1204,7 @@ class MainWindow(QMainWindow):
     def clear_all(self):
         self.files.clear()
         self.check_tab.table.setRowCount(0)
+        self.preview_tab.clear()
 
     def export_log(self):
         if self.check_tab.table.rowCount() == 0:
@@ -886,6 +1238,8 @@ class MainWindow(QMainWindow):
             self.check_tab.table.item(row, 2).setText("LÄUFT…")
             self.check_tab.table.item(row, 3).setText("-")
             self.check_tab.table.item(row, 3).setData(Qt.UserRole, None)
+            filepath = self.check_tab.table.item(row, 1).text()
+            self.preview_tab.set_result(filepath, "LÄUFT…", None)
         self.check_tab.btn_run.setEnabled(False)
         self.worker = Worker(self.files, self.active_profile)
         self.worker.finished_one.connect(self.update_result)
@@ -898,18 +1252,23 @@ class MainWindow(QMainWindow):
                 status_item = self.check_tab.table.item(row, 2)
                 details_item = self.check_tab.table.item(row, 3)
 
+                status_label = ""
                 if code == 0:
                     status_item.setText("PASS")
                     status_item.setBackground(QBrush(QColor(144, 238, 144)))  # hellgrün
+                    status_label = "PASS"
                 elif code == 2:
                     status_item.setText("FAIL")
                     status_item.setBackground(QBrush(QColor(255, 182, 193)))  # hellrot/rosa
+                    status_label = "FAIL"
                 elif code == 99:
                     status_item.setText("ERROR")
                     status_item.setBackground(QBrush(QColor(255, 255, 153)))  # gelb
+                    status_label = "ERROR"
                 else:
                     status_item.setText(f"Exit {code}")
                     status_item.setBackground(QBrush())  # Standard
+                    status_label = status_item.text()
 
                 fail_ratio = "-"
                 clipboard_text = ""
@@ -920,6 +1279,8 @@ class MainWindow(QMainWindow):
                     clipboard_text = str(payload)
                 details_item.setText(fail_ratio)
                 details_item.setData(Qt.UserRole, clipboard_text)
+
+                self.preview_tab.set_result(filepath, status_label, payload if isinstance(payload, dict) else {"fail_ratio": fail_ratio, "clipboard": clipboard_text})
                 break
 
 
