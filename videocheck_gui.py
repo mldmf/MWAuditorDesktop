@@ -20,6 +20,7 @@ Build (.app):
     videocheck_gui.py
 """
 
+import ast
 import os
 import sys
 import json
@@ -28,7 +29,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QAction, QIcon, QPixmap, QColor, QBrush
+from PySide6.QtGui import QAction, QIcon, QColor, QBrush, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -51,7 +52,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
 )
 
-APP_TITLE = "VideoCheck"
+APP_TITLE = "Matchwinners Auditor"
 
 # --- Ressourcenpfade (PyInstaller-kompatibel) ---
 def resource_path(rel_path: str) -> str:
@@ -63,13 +64,162 @@ def resource_path(rel_path: str) -> str:
 
 CHECK_MEDIA = resource_path("check_media.py")
 DEFAULT_PROFILE = resource_path("zielwerte.json")  # optional
-LOGO_PATH = resource_path("logo.png")              # optional (Header/Window-Icon)
+EMBLEM_PATH = resource_path("mw-emblem.svg")       # optional (Header/Window-Icon)
 
 SUPPORTED_EXTS = {".mp4", ".mov", ".mkv", ".ts", ".mxf", ".avi", ".webm"}
 
+CRITERIA_META = {
+    "dateiformat": {"label": "Dateiformat"},
+    "farbraum": {"label": "Farbraum"},
+    "bit_tiefe": {"label": "Farbgenauigkeit", "unit": "bit"},
+    "bildrate_fps": {"label": "Bildrate", "unit": "fps"},
+    "videolänge_s": {"label": "Videolänge", "unit": "Sekunden"},
+    "frame_rate_mode": {"label": "Bildraten Modus"},
+    "auflösung.x": {"label": "Horizontale Auflösung", "unit": "Pixel"},
+    "auflösung.y": {"label": "Vertikale Auflösung", "unit": "Pixel"},
+}
+
+CRITERIA_ORDER = [
+    "dateiformat",
+    "farbraum",
+    "bit_tiefe",
+    "bildrate_fps",
+    "videolänge_s",
+    "frame_rate_mode",
+    "auflösung.x",
+    "auflösung.y",
+]
+
+
+def _format_number(value: Optional[float]) -> str:
+    if value is None:
+        return "-"
+    try:
+        if abs(value - int(round(value))) < 1e-6:
+            return f"{int(round(value)):,}".replace(",", ".")
+        return ("{:.3f}".format(value)).rstrip("0").rstrip(".")
+    except Exception:
+        return str(value)
+
+
+def _format_value(key: str, value: Optional[object]) -> str:
+    if value is None:
+        return "-"
+    meta = CRITERIA_META.get(key, {})
+    unit = meta.get("unit")
+    if isinstance(value, (int, float)):
+        formatted = _format_number(float(value))
+    else:
+        formatted = str(value)
+    if unit and formatted != "-":
+        unit_lower = unit.lower()
+        if unit_lower == "pixel":
+            formatted = f"{formatted} Pixel"
+        elif unit_lower == "sekunden":
+            formatted = f"{formatted} Sekunden"
+        elif unit_lower == "fps":
+            formatted = f"{formatted} fps"
+        else:
+            formatted = f"{formatted} {unit}"
+    return formatted
+
+
+def _get_actual_value(report: Optional[dict], key: str) -> Optional[object]:
+    if not report:
+        return None
+    media = report.get("media_profile", {}) if isinstance(report, dict) else {}
+    if key == "videolänge_s":
+        return media.get("videolänge_s")
+    if key == "bit_tiefe":
+        return media.get("bit_tiefe")
+    if key == "bildrate_fps":
+        return media.get("bildrate_fps")
+    if key == "dateiformat":
+        return media.get("dateiformat")
+    if key == "farbraum":
+        return media.get("farbraum")
+    if key == "frame_rate_mode":
+        return media.get("frame_rate_mode")
+    if key == "auflösung.x":
+        return media.get("auflösung", {}).get("x")
+    if key == "auflösung.y":
+        return media.get("auflösung", {}).get("y")
+    return None
+
+
+def _parse_range_info(info: str) -> Tuple[Optional[float], Optional[float]]:
+    min_val = max_val = None
+    try:
+        parts = dict(part.split("=", 1) for part in info.split(",") if "=" in part)
+        if "min" in parts:
+            min_val = float(parts["min"].strip())
+        if "max" in parts:
+            max_val = float(parts["max"].strip())
+    except Exception:
+        return None, None
+    return min_val, max_val
+
+
+def _parse_allowed_info(info: str) -> Tuple[Optional[str], Optional[List[str]]]:
+    info = info.strip()
+    if " nicht in " in info:
+        actual_part, allowed_part = info.split(" nicht in ", 1)
+        actual = actual_part.strip().strip("'\"")
+        try:
+            allowed = ast.literal_eval(allowed_part.strip())
+            if isinstance(allowed, list):
+                allowed = [str(a).strip() for a in allowed]
+            else:
+                allowed = [str(allowed)]
+        except Exception:
+            allowed = [allowed_part.strip()]
+        return actual, allowed
+    if info.endswith(" erlaubt"):
+        actual = info.rsplit(" ", 1)[0].strip().strip("'\"")
+        return actual, [actual]
+    return None, None
+
+
+def _expected_from_info(key: str, info: str) -> str:
+    if not info:
+        return "-"
+    info = info.strip()
+    if info.startswith("min=") or " min=" in info or "max=" in info:
+        min_val, max_val = _parse_range_info(info)
+        if min_val is None and max_val is None:
+            return info
+        if min_val is not None and max_val is not None:
+            if abs(min_val - max_val) < 1e-6:
+                return _format_value(key, min_val)
+            midpoint = (min_val + max_val) / 2.0
+            return _format_value(key, midpoint)
+        if min_val is not None:
+            return _format_value(key, min_val)
+        if max_val is not None:
+            return _format_value(key, max_val)
+        return info
+    actual, allowed = _parse_allowed_info(info)
+    if allowed:
+        return ", ".join(allowed)
+    return info
+
+
+def _actual_from_info_or_report(key: str, info: str, report: Optional[dict]) -> str:
+    actual, _allowed = _parse_allowed_info(info)
+    if actual:
+        return _format_value(key, actual)
+    if "wert=" in info:
+        try:
+            parts = dict(part.split("=", 1) for part in info.split(",") if "=" in part)
+            if "wert" in parts:
+                return _format_value(key, float(parts["wert"].strip()))
+        except Exception:
+            pass
+    return _format_value(key, _get_actual_value(report, key))
+
 # ---------------- Worker -----------------
 class Worker(QThread):
-    finished_one = Signal(str, int, str)  # filepath, exitcode, details
+    finished_one = Signal(str, int, object)  # payload enthält u.a. Fehlermetriken
     finished_all = Signal()
 
     def __init__(self, files: List[str], profile_path: Optional[str]):
@@ -79,11 +229,11 @@ class Worker(QThread):
 
     def run(self):
         for f in self.files:
-            code, details = self.run_check(f)
-            self.finished_one.emit(f, code, details)
+            code, payload = self.run_check(f)
+            self.finished_one.emit(f, code, payload)
         self.finished_all.emit()
 
-    def run_check(self, filepath: str) -> Tuple[int, str]:
+    def run_check(self, filepath: str) -> Tuple[int, dict]:
         # python check_media.py <file> [--profile <json>] --summary-only
         cmd = [sys.executable, CHECK_MEDIA, filepath, "--summary-only"]
         if self.profile_path:
@@ -98,10 +248,114 @@ class Worker(QThread):
             )
             out = proc.stdout or ""
             code = proc.returncode
-            details = extract_brief_summary(out)
-            return code, details
+            summary = extract_brief_summary(out)
+            report = self._load_validation_report(filepath)
+            fail_ratio, fail_total = self._compute_fail_ratio(report)
+            clipboard_text = self._build_clipboard_text(filepath, code, report, summary, fail_ratio)
+            payload = {
+                "summary": summary,
+                "report": report,
+                "fail_ratio": fail_ratio,
+                "total": fail_total,
+                "clipboard": clipboard_text,
+            }
+            return code, payload
         except Exception as e:
-            return 99, f"ERROR: {e}"
+            return 99, {
+                "summary": f"ERROR: {e}",
+                "report": None,
+                "fail_ratio": "-",
+                "total": 0,
+                "clipboard": f"Prüfung konnte nicht durchgeführt werden: {e}",
+            }
+
+    def _load_validation_report(self, filepath: str) -> Optional[dict]:
+        try:
+            report_path = Path(filepath).parent / f"{Path(filepath).name}.validationreport.json"
+            if report_path.exists():
+                return json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return None
+
+    def _compute_fail_ratio(self, report: Optional[dict]) -> Tuple[str, int]:
+        if not report:
+            return "-", 0
+        details = report.get("validation", {}).get("details", {})
+        if not isinstance(details, dict):
+            return "-", 0
+        evaluated = [v for v in details.values() if isinstance(v, dict) and v.get("info") != "keine Prüfung"]
+        if not evaluated:
+            return "-", 0
+        fails = sum(1 for v in evaluated if not v.get("ok", False))
+        total = len(evaluated)
+        return f"{fails}/{total}", total
+
+    def _build_clipboard_text(
+        self,
+        filepath: str,
+        code: int,
+        report: Optional[dict],
+        summary: str,
+        fail_ratio: str,
+    ) -> str:
+        if not report:
+            return summary or f"Prüfung für {Path(filepath).name} (Exit {code})."
+        details = report.get("validation", {}).get("details", {})
+        status = report.get("validation", {}).get("status", "unbekannt").upper()
+        filename = report.get("filename") or Path(filepath).name
+
+        passed_lines: List[str] = []
+        failed_lines: List[str] = []
+        if isinstance(details, dict):
+            for key, info in details.items():
+                if not isinstance(info, dict):
+                    continue
+                text = info.get("info", "")
+                if text == "keine Prüfung":
+                    continue
+                entry = f"- {key}: {'OK' if info.get('ok') else 'NICHT OK'} ({text})"
+                if info.get("ok"):
+                    passed_lines.append(entry)
+                else:
+                    failed_lines.append(entry)
+
+        status_text = "Datenprüfung bestanden" if status == "PASSEND" else "Datenprüfung nicht bestanden"
+        lines = [
+            f"Video: {filename}",
+            f"Status: {status_text}",
+            f"Fehler: {fail_ratio}",
+        ]
+
+        formatted_failed: List[str] = []
+        formatted_passed: List[str] = []
+
+        for key in CRITERIA_ORDER:
+            if not isinstance(details, dict) or key not in details:
+                continue
+            info = details[key]
+            if not isinstance(info, dict):
+                continue
+            if info.get("info") == "keine Prüfung":
+                continue
+            label = CRITERIA_META.get(key, {}).get("label", key)
+            expected = _expected_from_info(key, info.get("info", ""))
+            actual = _actual_from_info_or_report(key, info.get("info", ""), report)
+            if info.get("ok"):
+                formatted_passed.append(f"- {label}: {actual}")
+            else:
+                formatted_failed.append(f"- {label}: {expected} | {actual}")
+
+        if formatted_failed:
+            lines.append("")
+            lines.append("Nicht erfüllte Kriterien (Soll | Ist):")
+            lines.extend(formatted_failed)
+        if formatted_passed:
+            lines.append("")
+            lines.append("Erfüllte Kriterien (Ist):")
+            lines.extend(formatted_passed)
+
+        return "\n".join(lines)
 
 
 def extract_brief_summary(output: str) -> str:
@@ -471,13 +725,15 @@ class CheckTab(QWidget):
         header = QHBoxLayout()
         logo_label = QLabel()
         if logo_path and Path(logo_path).exists():
-            pm = QPixmap(logo_path)
+            icon = QIcon(logo_path)
+            pm = icon.pixmap(96, 96)
             if not pm.isNull():
-                logo_label.setPixmap(pm.scaledToHeight(36, Qt.SmoothTransformation))
-        title = QLabel("VideoCheck — MatchWinners")
-        title.setStyleSheet("font-weight: 600; font-size: 18px;")
-        header.addWidget(logo_label)
-        header.addWidget(title)
+                logo_label.setPixmap(pm.scaledToHeight(56, Qt.SmoothTransformation))
+        title = QLabel("Matchwinners Auditor")
+        title.setStyleSheet("font-weight: 600; font-size: 20px;")
+        header.addStretch()
+        header.addWidget(logo_label, alignment=Qt.AlignCenter)
+        header.addWidget(title, alignment=Qt.AlignCenter)
         header.addStretch()
         v.addLayout(header)
 
@@ -487,7 +743,7 @@ class CheckTab(QWidget):
 
         # Tabelle
         self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Datei", "Pfad", "Status", "Details"])
+        self.table.setHorizontalHeaderLabels(["Datei", "Pfad", "Status", "Fehler"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -515,8 +771,18 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
-        if Path(LOGO_PATH).exists():
-            self.setWindowIcon(QIcon(LOGO_PATH))  # Laufzeit-Icon (Dock-Icon via --icon beim Build)
+        icon_path = None
+        mw_icns = Path(resource_path("mw.icns"))
+        if mw_icns.exists():
+            icon_path = mw_icns
+        elif Path(EMBLEM_PATH).exists():
+            icon_path = Path(EMBLEM_PATH)
+        else:
+            fallback_png = Path(resource_path("logo.png"))
+            if fallback_png.exists():
+                icon_path = fallback_png
+        if icon_path:
+            self.setWindowIcon(QIcon(str(icon_path)))
 
         self.files: List[str] = []
         self.worker: Optional[Worker] = None
@@ -526,7 +792,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(tabs)
 
         # Tab 1: Prüfen
-        self.check_tab = CheckTab(LOGO_PATH if Path(LOGO_PATH).exists() else None)
+        self.check_tab = CheckTab(EMBLEM_PATH if Path(EMBLEM_PATH).exists() else None)
         tabs.addTab(self.check_tab, "Prüfen")
 
         # Tab 2: Zielwerte
@@ -534,12 +800,15 @@ class MainWindow(QMainWindow):
         self.profile_tab.profile_changed.connect(self.set_active_profile)
         tabs.addTab(self.profile_tab, "Zielwerte")
 
+        self.statusBar()  # Statusleiste für kurze Hinweise anlegen
+
         # Verkabelung Check-Tab
         self.check_tab.drop.files_dropped.connect(self.add_files)
         self.check_tab.btn_add.clicked.connect(self.pick_files)
         self.check_tab.btn_run.clicked.connect(self.run_checks)
         self.check_tab.btn_clear.clicked.connect(self.clear_all)
         self.check_tab.btn_export.clicked.connect(self.export_log)
+        self.check_tab.table.itemClicked.connect(self.handle_table_item_clicked)
 
     # --- Profile ---
     def set_active_profile(self, path: str):
@@ -572,7 +841,8 @@ class MainWindow(QMainWindow):
         name_item = QTableWidgetItem(Path(filepath).name)
         path_item = QTableWidgetItem(filepath)
         status_item = QTableWidgetItem("WARTET")
-        details_item = QTableWidgetItem("")
+        details_item = QTableWidgetItem("-")
+        details_item.setData(Qt.UserRole, None)
         for it in (name_item, path_item, status_item, details_item):
             it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         self.check_tab.table.setItem(row, 0, name_item)
@@ -597,7 +867,7 @@ class MainWindow(QMainWindow):
             data.append({
                 "file": self.check_tab.table.item(row, 1).text(),
                 "status": self.check_tab.table.item(row, 2).text(),
-                "details": self.check_tab.table.item(row, 3).text(),
+                "fehler": self.check_tab.table.item(row, 3).text(),
             })
         try:
             Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -614,14 +884,15 @@ class MainWindow(QMainWindow):
         # Reset Status
         for row in range(self.check_tab.table.rowCount()):
             self.check_tab.table.item(row, 2).setText("LÄUFT…")
-            self.check_tab.table.item(row, 3).setText("")
+            self.check_tab.table.item(row, 3).setText("-")
+            self.check_tab.table.item(row, 3).setData(Qt.UserRole, None)
         self.check_tab.btn_run.setEnabled(False)
         self.worker = Worker(self.files, self.active_profile)
         self.worker.finished_one.connect(self.update_result)
         self.worker.finished_all.connect(self.finish_run)
         self.worker.start()
 
-    def update_result(self, filepath: str, code: int, details: str):
+    def update_result(self, filepath: str, code: int, payload: object):
         for row in range(self.check_tab.table.rowCount()):
             if self.check_tab.table.item(row, 1).text() == filepath:
                 status_item = self.check_tab.table.item(row, 2)
@@ -640,7 +911,15 @@ class MainWindow(QMainWindow):
                     status_item.setText(f"Exit {code}")
                     status_item.setBackground(QBrush())  # Standard
 
-                details_item.setText(details)
+                fail_ratio = "-"
+                clipboard_text = ""
+                if isinstance(payload, dict):
+                    fail_ratio = payload.get("fail_ratio", "-") or "-"
+                    clipboard_text = payload.get("clipboard") or payload.get("summary") or ""
+                else:
+                    clipboard_text = str(payload)
+                details_item.setText(fail_ratio)
+                details_item.setData(Qt.UserRole, clipboard_text)
                 break
 
 
@@ -648,11 +927,31 @@ class MainWindow(QMainWindow):
     def finish_run(self):
         self.check_tab.btn_run.setEnabled(True)
 
+    def handle_table_item_clicked(self, item: QTableWidgetItem):
+        if item.column() != 3:
+            return
+        clip_text = item.data(Qt.UserRole)
+        if not clip_text:
+            return
+        QApplication.clipboard().setText(str(clip_text))
+        self.statusBar().showMessage("Fehlerbericht in die Zwischenablage kopiert", 3000)
+
 
 def main():
     app = QApplication(sys.argv)
-    if Path(LOGO_PATH).exists():
-        app.setWindowIcon(QIcon(LOGO_PATH))  # Laufzeit-Icon
+    icon_path = None
+    mw_icns = Path(resource_path("mw.icns"))
+    if mw_icns.exists():
+        icon_path = mw_icns
+    elif Path(EMBLEM_PATH).exists():
+        icon_path = Path(EMBLEM_PATH)
+    else:
+        fallback_png = Path(resource_path("logo.png"))
+        if fallback_png.exists():
+            icon_path = fallback_png
+    if icon_path:
+        app.setWindowIcon(QIcon(str(icon_path)))
+    app.setFont(QFont("Helvetica Neue"))
     w = MainWindow()
     w.resize(980, 640)
     w.show()

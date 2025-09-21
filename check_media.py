@@ -319,7 +319,7 @@ def validate_full(media_profile: Dict[str, Any], profile_spec: Optional[Dict[str
 def main():
     ap = argparse.ArgumentParser(description="Media-Profil & Validation-Report (JSON), Hash-ID, CFR/VFR-Erkennung, farbige Konsole.")
     ap.add_argument("input", help="Pfad zur Datei")
-    ap.add_argument("--profile", help="Pfad zur Zielwerte-JSON (optional)")
+    ap.add_argument("--profile", required=True, help="Pfad zur Zielwerte-JSON")
     ap.add_argument("--pretty", action="store_true", help="JSON schön formatiert")
     ap.add_argument("--media-out", help="Pfad für Media-Profil (Default: <cwd>/<input_name>.mediaprofile.json)")
     ap.add_argument("--report-out", help="Pfad für Validation-Report (Default: <cwd>/<input_name>.validationreport.json)")
@@ -331,9 +331,28 @@ def main():
                     help="Nur Validierungs-Zusammenfassung in der Konsole ausgeben")
     args = ap.parse_args()
 
-    in_path = args.input
-    base_name = Path(in_path).name
-    default_out_dir = Path(args.out_dir) if args.out_dir else Path.cwd()
+    in_path = Path(args.input)
+    base_name = in_path.name
+
+    profile_path = Path(args.profile)
+    if not profile_path.exists():
+        print(f"Fehler: Zielwerte-Datei '{profile_path}' nicht gefunden.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        profile_spec = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Fehler: Zielwerte-Datei '{profile_path}' konnte nicht geladen werden: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.out_dir:
+        default_out_dir = Path(args.out_dir)
+    else:
+        try:
+            default_out_dir = in_path.resolve().parent
+        except FileNotFoundError:
+            default_out_dir = in_path.parent if in_path.parent != Path("") else Path.cwd()
+    default_out_dir = default_out_dir if default_out_dir else Path.cwd()
 
     media_out = Path(args.media_out) if args.media_out else default_out_dir / f"{base_name}.mediaprofile.json"
     report_out = Path(args.report_out) if args.report_out else default_out_dir / f"{base_name}.validationreport.json"
@@ -346,18 +365,21 @@ def main():
     media_profile = build_media_profile(in_path, args.hash_algo)
 
     # Media-Profil schreiben
-    media_out.parent.mkdir(parents=True, exist_ok=True)
-    with open(media_out, "w", encoding="utf-8") as f:
-        json.dump(media_profile, f, ensure_ascii=False, indent=2 if args.pretty else None)
+    def _write_json(target: Path, payload: Any, label: str) -> bool:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2 if args.pretty else None)
+            return True
+        except PermissionError:
+            print(f"Warnung: Kein Schreibzugriff für {label} '{target}'. Überspringe.")
+        except OSError as e:
+            print(f"Warnung: Konnte {label} '{target}' nicht schreiben: {e}. Überspringe.")
+        return False
+
+    _write_json(media_out, media_profile, "Media-Profil")
 
     # Profil laden (optional) & Report bauen
-    profile_spec = None
-    if args.profile:
-        try:
-            profile_spec = json.loads(Path(args.profile).read_text(encoding="utf-8"))
-        except Exception as e:
-            print(f"Warnung: konnte Profil '{args.profile}' nicht lesen: {e}", file=sys.stderr)
-
     validation = validate_full(media_profile, profile_spec)
 
     report_obj = {
@@ -368,9 +390,7 @@ def main():
     }
 
     # Report schreiben
-    report_out.parent.mkdir(parents=True, exist_ok=True)
-    with open(report_out, "w", encoding="utf-8") as f:
-        json.dump(report_obj, f, ensure_ascii=False, indent=2 if args.pretty else None)
+    _write_json(report_out, report_obj, "Validation-Report")
 
     # Konsole
     if not args.summary_only:
