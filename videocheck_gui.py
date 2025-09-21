@@ -62,6 +62,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QSizePolicy,
     QFileDialog,
+    QSlider,
 )
 
 APP_TITLE = "Matchwinners Auditor"
@@ -796,6 +797,7 @@ class VideoPreviewTab(QWidget):
         self.current_index: int = 0
         self.zoom_factor: float = 1.0
         self.pixmap_item: Optional[QGraphicsPixmapItem] = None
+        self._slider_active: bool = False
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._advance_frame)
@@ -822,49 +824,68 @@ class VideoPreviewTab(QWidget):
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_layout.addWidget(self.view, 1)
 
+        self.position_slider = QSlider(Qt.Horizontal)
+        self.position_slider.setEnabled(False)
+        self.position_slider.setRange(0, 0)
+        self.position_slider.sliderPressed.connect(self._slider_pressed)
+        self.position_slider.sliderReleased.connect(self._slider_released)
+        self.position_slider.sliderMoved.connect(self._slider_moved)
+        right_layout.addWidget(self.position_slider)
+
         controls = QHBoxLayout()
+        controls.setContentsMargins(0, 6, 0, 6)
+        controls.setSpacing(8)
+        style = self.style()
 
         self.prev_btn = QToolButton()
-        self.prev_btn.setText("⟨ Frame")
+        self.prev_btn.setIcon(style.standardIcon(QStyle.SP_MediaSkipBackward))
+        self.prev_btn.setToolTip("Vorheriger Frame")
         self.prev_btn.clicked.connect(self.step_previous)
         controls.addWidget(self.prev_btn)
 
         self.play_btn = QToolButton()
-        self.play_btn.setText("Play")
+        self.play_btn.setIcon(style.standardIcon(QStyle.SP_MediaPlay))
+        self.play_btn.setToolTip("Play/Pause")
         self.play_btn.clicked.connect(self.toggle_playback)
         controls.addWidget(self.play_btn)
 
         self.next_btn = QToolButton()
-        self.next_btn.setText("Frame ⟩")
+        self.next_btn.setIcon(style.standardIcon(QStyle.SP_MediaSkipForward))
+        self.next_btn.setToolTip("Nächster Frame")
         self.next_btn.clicked.connect(self.step_next)
         controls.addWidget(self.next_btn)
 
-        controls.addSpacing(20)
+        controls.addSpacing(12)
 
         self.zoom_out_btn = QToolButton()
-        self.zoom_out_btn.setText("Zoom -")
+        self.zoom_out_btn.setIcon(style.standardIcon(QStyle.SP_ArrowDown))
+        self.zoom_out_btn.setToolTip("Zoom Out")
         self.zoom_out_btn.clicked.connect(lambda: self.adjust_zoom(1 / 1.25))
         controls.addWidget(self.zoom_out_btn)
 
         self.zoom_reset_btn = QToolButton()
-        self.zoom_reset_btn.setText("Original")
+        self.zoom_reset_btn.setText("100%")
+        self.zoom_reset_btn.setToolTip("Originalgröße")
         self.zoom_reset_btn.clicked.connect(self.reset_zoom)
         controls.addWidget(self.zoom_reset_btn)
 
         self.zoom_in_btn = QToolButton()
-        self.zoom_in_btn.setText("Zoom +")
+        self.zoom_in_btn.setIcon(style.standardIcon(QStyle.SP_ArrowUp))
+        self.zoom_in_btn.setToolTip("Zoom In")
         self.zoom_in_btn.clicked.connect(lambda: self.adjust_zoom(1.25))
         controls.addWidget(self.zoom_in_btn)
 
-        controls.addSpacing(20)
+        controls.addSpacing(12)
 
         self.save_btn = QToolButton()
-        self.save_btn.setText("PNG sichern")
+        self.save_btn.setText("Screenshot")
+        self.save_btn.setToolTip("Screenshot als PNG speichern")
         self.save_btn.clicked.connect(self.save_current_frame)
         controls.addWidget(self.save_btn)
 
         self.copy_btn = QToolButton()
-        self.copy_btn.setText("PNG kopieren")
+        self.copy_btn.setText("Kopieren")
+        self.copy_btn.setToolTip("Screenshot in Zwischenablage kopieren")
         self.copy_btn.clicked.connect(self.copy_current_frame)
         controls.addWidget(self.copy_btn)
 
@@ -912,6 +933,9 @@ class VideoPreviewTab(QWidget):
         self._stop_loader()
         self.frames = []
         self.info_label.setText("Keine Datei geladen")
+        self._slider_active = False
+        self._update_slider_range()
+        self._update_play_icon()
 
     # --- Slots ---
     def toggle_playback(self) -> None:
@@ -919,11 +943,11 @@ class VideoPreviewTab(QWidget):
             return
         if self.timer.isActive():
             self.timer.stop()
-            self.play_btn.setText("Play")
+            self._update_play_icon()
             return
         interval = int(1000 / self.fps) if self.fps else 40
         self.timer.start(max(10, interval))
-        self.play_btn.setText("Pause")
+        self._update_play_icon()
 
     def step_next(self) -> None:
         self._advance_frame(step=1, loop=False)
@@ -951,7 +975,7 @@ class VideoPreviewTab(QWidget):
 
     def load_clip(self, filepath: str) -> None:
         self.timer.stop()
-        self.play_btn.setText("Play")
+        self._update_play_icon()
         self._stop_loader()
         self.frames = []
         self.current_index = 0
@@ -959,6 +983,10 @@ class VideoPreviewTab(QWidget):
         self.scene.clear()
         self.pixmap_item = None
         self.info_label.setText("Lade Video…")
+        self._slider_active = False
+        self.position_slider.setEnabled(False)
+        self.position_slider.setRange(0, 0)
+        self.position_slider.setValue(0)
         self.loader = FrameLoader(filepath)
         self.loader.metadata_ready.connect(self._on_metadata_ready)
         self.loader.frame_ready.connect(self._on_frame_ready)
@@ -969,7 +997,7 @@ class VideoPreviewTab(QWidget):
     def _advance_frame(self, step: int = 1, loop: bool = True) -> None:
         if not self.frames:
             self.timer.stop()
-            self.play_btn.setText("Play")
+            self._update_play_icon()
             return
         frame_count = len(self.frames)
         self.current_index += step
@@ -979,7 +1007,7 @@ class VideoPreviewTab(QWidget):
             else:
                 self.current_index = frame_count - 1
                 self.timer.stop()
-                self.play_btn.setText("Play")
+                self._update_play_icon()
         elif self.current_index < 0:
             if loop:
                 self.current_index = frame_count - 1
@@ -1001,6 +1029,7 @@ class VideoPreviewTab(QWidget):
             self.pixmap_item.setPixmap(pixmap)
         self.scene.setSceneRect(self.pixmap_item.boundingRect())
         self._apply_zoom()
+        self._update_slider_range()
         status = ""
         current_item = self.list_widget.currentItem()
         if current_item:
@@ -1031,20 +1060,77 @@ class VideoPreviewTab(QWidget):
             item.setForeground(QBrush())
         item.setText(text)
 
+    @staticmethod
+    def _format_time(seconds: float) -> str:
+        if seconds < 0 or not seconds:
+            return "00:00"
+        secs_total = int(round(seconds))
+        mins = secs_total // 60
+        secs = secs_total % 60
+        return f"{mins:02d}:{secs:02d}"
+
     def _update_info_label(self, status: str) -> None:
         if not self.frames:
             self.info_label.setText("Keine Datei geladen")
             return
         frame_count = len(self.frames)
         time_pos = self.current_index / self.fps if self.fps else 0.0
+        total_time = frame_count / self.fps if self.fps else 0.0
         status_text = status or ""
         info_parts = [
             f"Frame {self.current_index + 1}/{frame_count}",
-            f"Zeit {time_pos:.2f}s",
+            f"Zeit {self._format_time(time_pos)} / {self._format_time(total_time)}",
         ]
         if status_text:
             info_parts.append(f"Status: {status_text}")
         self.info_label.setText(" | ".join(info_parts))
+
+    def _update_play_icon(self) -> None:
+        style = self.style()
+        if self.timer.isActive():
+            self.play_btn.setIcon(style.standardIcon(QStyle.SP_MediaPause))
+        else:
+            self.play_btn.setIcon(style.standardIcon(QStyle.SP_MediaPlay))
+
+    def _update_slider_range(self) -> None:
+        if not self.position_slider:
+            return
+        if not self.frames:
+            self.position_slider.blockSignals(True)
+            self.position_slider.setEnabled(False)
+            self.position_slider.setRange(0, 0)
+            self.position_slider.setValue(0)
+            self.position_slider.blockSignals(False)
+            return
+        max_index = max(0, len(self.frames) - 1)
+        self.position_slider.blockSignals(True)
+        self.position_slider.setEnabled(True)
+        self.position_slider.setRange(0, max_index)
+        if not self._slider_active:
+            self.position_slider.setValue(min(self.current_index, max_index))
+        self.position_slider.blockSignals(False)
+
+    def _slider_pressed(self) -> None:
+        if not self.frames:
+            return
+        self._slider_active = True
+        if self.timer.isActive():
+            self.timer.stop()
+            self._update_play_icon()
+
+    def _slider_moved(self, value: int) -> None:
+        if not self._slider_active or not self.frames:
+            return
+        self.current_index = max(0, min(value, len(self.frames) - 1))
+        self._show_current_frame()
+
+    def _slider_released(self) -> None:
+        if not self.frames:
+            self._slider_active = False
+            return
+        self.current_index = max(0, min(self.position_slider.value(), len(self.frames) - 1))
+        self._slider_active = False
+        self._show_current_frame()
 
     def _stop_loader(self) -> None:
         if self.loader and self.loader.isRunning():
@@ -1062,19 +1148,28 @@ class VideoPreviewTab(QWidget):
             self.frames[index] = image
         if index == self.current_index or len(self.frames) == 1:
             self._show_current_frame()
+        else:
+            self._update_slider_range()
 
     def _on_loader_failed(self, message: str) -> None:
         self.frames = []
         self.scene.clear()
         self.pixmap_item = None
         self.info_label.setText(message)
+        self._update_slider_range()
+        self._update_play_icon()
 
     def _on_loader_finished(self) -> None:
         if not self.frames:
+            self._update_slider_range()
+            self._update_play_icon()
             return
         if self.current_index >= len(self.frames):
             self.current_index = len(self.frames) - 1
             self._show_current_frame()
+        else:
+            self._update_slider_range()
+        self._update_play_icon()
 
     def _current_image(self) -> Optional[QImage]:
         if not self.frames or self.current_index >= len(self.frames):
